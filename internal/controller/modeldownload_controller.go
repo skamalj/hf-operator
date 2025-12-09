@@ -36,6 +36,7 @@ import (
 
 	hfopsv1alpha1 "github.com/skamalj/hf-operator/api/v1alpha1"
 )
+import _ "embed"
 
 // RBAC
 // (these markers will be used by controller-gen / make manifests to create RBAC rules)
@@ -56,6 +57,9 @@ type ModelDownloadReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
+
+//go:embed scripts/download.sh
+var downloadScript string
 
 // sanitize converts model or CR names to safe pod/job names.
 func sanitize(name string) string {
@@ -241,34 +245,19 @@ func (r *ModelDownloadReconciler) buildJob(md *hfopsv1alpha1.ModelDownload, mode
 	// Build the script that the Job container will run.
 	// NOTE: token is injected directly in the script env; token is not stored in annotations.
 	script := fmt.Sprintf(`
-set -e
-export TOKEN="%s"
+cat << 'EOF' > /tmp/download.sh
+%s
+EOF
 
-# If model folder already exists, skip
-if [ -d "/models/%s" ] && [ "$(ls -A /models/%s | wc -l)" -gt 0 ]; then
-  echo "Model %s already exists. Skipping."
-  exit 0
-fi
-
-apt-get update && apt-get install -y python3 python3-pip git-lfs curl
-pip install -U huggingface_hub huggingface_hub[hf_transfer]
-
-export HF_HUB_ENABLE_HF_TRANSFER="%v"
-
-echo "Starting download for %s"
-hf download "%s" --token "$TOKEN" --local-dir "/models/%s"
-echo "Download finished for %s"
+chmod +x /tmp/download.sh
+/tmp/download.sh "%s" "%s" "%v"
 `,
-		token,                             // #1
-		model.Name,                        // #2
-		model.Name,                        // #3
-		model.Name,                        // #4
-		md.Spec.Settings.EnableHFTransfer, // #5 (bool %v)
-		model.Name,                        // #6
-		model.Name,                        // #7
-		model.Name,                        // #8
-		model.Name,                        // #9
-	)
+    downloadScript,          // 1 — the embedded script contents
+    token,                   // 2 — HF token
+    model.Name,              // 3 — model name
+    md.Spec.Settings.EnableHFTransfer, // 4 — bool
+)
+
 
 	// Pod spec
 	podSpec := corev1.PodSpec{

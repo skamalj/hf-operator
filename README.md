@@ -1,121 +1,214 @@
 # hf-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+`hf-operator` is a Kubernetes operator that automates downloading Hugging Face models onto a PersistentVolumeClaim (PVC). Each `ModelDownload` custom resource (CR) expresses the models you need, the PVC that will hold the artifacts, and optional runtime knobs such as the node pool to run on or whether to force a re-download. The operator turns that desired state into isolated, reproducible `Job` objects—one per model—so that downstream workloads (Serving, fine-tuning, evaluation, etc.) can rely on warm local storage without having to embed download logic.
 
-## Getting Started
+The project is built with Kubebuilder and controller-runtime and runs on any conformant Kubernetes cluster.
+
+## Core Features
+
+- Declarative model replication: describe one or more Hugging Face models in a CR; the operator keeps the PVC in sync.
+- Secret-aware reconciliation: changes to the referenced HF token secret automatically retrigger downloads.
+- Idempotent jobs: the controller hashes the model spec and download settings; jobs are recreated when something relevant changes or when `forceReload` is set.
+- Status tracking: `pending`, `completed`, and `failed` arrays surface the state of each model at a glance.
+- Distribution options: run straight from manifests, use the included Helm chart (`charts/hf-operator`), or ship a single `dist/install.yaml` bundle.
+
+## Architecture & Reconciliation Flow
+
+1. The controller watches `ModelDownload` CRs plus owned `Job` objects and referenced `Secrets`.
+2. For every model declared in `.spec.models`, the reconciler ensures there is exactly one job named `hf-dl-<cr>-<model>`.
+3. Each job runs an Ubuntu-based container that installs `huggingface_hub`, exports the token (if provided), optionally enables `hf_transfer`, and invokes `hf download <model> --local-dir /models/<model>`.
+4. All jobs mount the PVC declared in `.spec.storagePVC` at `/models`.
+5. When a job completes it is marked in `.status.completed`; failures inflight update `.status.failed`. Pending models remain listed until they succeed or fail.
+6. The reconciler requeues every 20s to refresh job status and also reacts immediately to spec or secret changes.
+
+## Custom Resource Schema
+
+`apiVersion: hfops.kamal.dev/v1alpha1`, `kind: ModelDownload`
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `.spec.models[]` | list of `ModelSpec` | yes | Models to download. `name` is the Hugging Face repo (e.g. `meta-llama/Llama-3.1-8B`). `sha` and `retryCount` are informational today but included in the spec hash so any change triggers a new job. |
+| `.spec.storagePVC` | string | yes | Name of an existing PVC mounted at `/models`. Each model is stored inside `/models/<model-name>`. |
+| `.spec.hfTokenRef` | `HFTokenSecretRef` | required for private models | Points to the secret that holds your Hugging Face access token (`name` + `key`). The secret must live in the same namespace as the CR. |
+| `.spec.nodePool` | string | no | When set, pods receive `nodeSelector: {"karpenter.sh/nodepool": <value>}` so you can steer downloads to a particular Karpenter node pool. |
+| `.spec.settings.timeoutMillis` | int | no | Reserved for future client-side timeouts (not yet enforced). |
+| `.spec.settings.enableHFTransfer` | bool | no | Toggles `HF_HUB_ENABLE_HF_TRANSFER`, unlocking the experimental HF Transfer acceleration path. |
+| `.spec.settings.keepAliveSeconds` | int | no | Sets `ttlSecondsAfterFinished` on the `Job` (defaults to 3600) so finished pods are garbage-collected. |
+| `.spec.settings.cpu` / `.spec.settings.memory` | string | no | Requests/limits for the download container. Defaults: `1` CPU, `4Gi` RAM. |
+| `.spec.settings.forceReload` | bool | no | When `true`, existing jobs are deleted and recreated even if the spec hash matches, ensuring a fresh download. |
+
+Status fields:
+
+- `.status.pending[]`: models with jobs created but not yet successful/failed.
+- `.status.completed[]`: models whose job succeeded at least once.
+- `.status.failed[]`: models whose job failed (controller leaves the job for inspection).
+
+## Quick Start
 
 ### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- Go `>= 1.24.6` if you plan to build from source.
+- Docker (or another OCI builder) `>= 17.03`.
+- `kubectl` configured for a v1.26+ cluster (any modern cluster works; Kind is great for local testing).
+- Existing PVC in the namespace where you deploy the CR.
+- Optional: Karpenter node pools when using `.spec.nodePool`.
+
+### 1. Build and push the controller image
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/hf-operator:tag
+make docker-build docker-push IMG=<registry>/hf-operator:<tag>
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
+### 2. Install CRDs and deploy the controller
 
 ```sh
 make install
+make deploy IMG=<registry>/hf-operator:<tag>
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+### 3. Create the HF token secret (skip for public models)
 
 ```sh
-make deploy IMG=<some-registry>/hf-operator:tag
+kubectl -n <ns> create secret generic hf-token \
+  --from-literal=token=<hf_access_token>
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+### 4. Author a `ModelDownload`
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
-
-```sh
-kubectl apply -k config/samples/
+```yaml
+apiVersion: hfops.kamal.dev/v1alpha1
+kind: ModelDownload
+metadata:
+  name: llama-cache
+  namespace: inference
+spec:
+  storagePVC: llama-pvc
+  hfTokenRef:
+    name: hf-token
+    key: token
+  nodePool: spot-downloaders
+  settings:
+    enableHFTransfer: true
+    cpu: "2"
+    memory: 8Gi
+    keepAliveSeconds: 600
+  models:
+    - name: meta-llama/Llama-3.1-8B
+    - name: microsoft/Phi-3.5-mini-instruct
+      sha: 123abc456def # optional note for auditors
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+Apply it:
 
 ```sh
-kubectl delete -k config/samples/
+kubectl apply -f modeldownload.yaml
+kubectl get modeldownloads.hfops.kamal.dev llama-cache -n inference -o wide
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+Check the per-model job logs with:
 
 ```sh
+kubectl logs job/hf-dl-llama-cache-meta-llama-llama-3-1-8b -n inference
+```
+
+### Uninstall
+
+```sh
+kubectl delete -f modeldownload.yaml
+make undeploy
 make uninstall
 ```
 
-**UnDeploy the controller from the cluster:**
+## Installation Options
+
+### From source (Kustomize-based)
 
 ```sh
-make undeploy
+make install
+make deploy IMG=<registry>/hf-operator:<tag>
 ```
+
+`make undeploy` and `make uninstall` reverse the process.
+
+### Pre-built installer bundle
+
+```sh
+make build-installer IMG=<registry>/hf-operator:<tag>
+kubectl apply -f dist/install.yaml
+```
+
+Host the resulting manifest and users can install with a single `kubectl apply -f <url>`.
+
+### Helm chart
+
+The chart in `charts/hf-operator` mirrors the default Kustomize deployment and can also install the CRDs.
+
+```sh
+helm upgrade --install hf-operator charts/hf-operator \
+  --namespace hf-operator --create-namespace \
+  --set image.repository=<registry>/hf-operator \
+  --set image.tag=<tag>
+```
+
+Key values:
+
+- `image.repository` / `image.tag`: controller image.
+- `serviceAccount.*` / `rbac.create`: RBAC generation toggles.
+- `installCRDs`: set to `false` if CRDs are managed elsewhere.
+
+## Managing Downloads
+
+- **Force a refresh**: Patch `.spec.settings.forceReload=true` and the operator will delete/recreate jobs, guaranteeing new artifacts on disk.
+- **Scheduling control**: `.spec.nodePool` constrains downloads to nodes labeled `karpenter.sh/nodepool=<value>`. Remove the field to let the scheduler choose.
+- **Resource sizing**: adjust `.spec.settings.cpu` / `.spec.settings.memory` to match the size of the artifacts being pulled.
+- **PVC hygiene**: the job script skips downloads if `/models/<model>` already exists and contains files. Remove the folder (or set `forceReload`) to trigger a re-download.
+- **Secret rotation**: updating the referenced secret automatically enqueues the owning CR thanks to the additional watch in `SetupWithManager`.
+
+## Observability & Troubleshooting
+
+- Operator logs: `kubectl logs deployment/hf-operator-controller-manager -n hf-operator`.
+- Custom resource status: `kubectl get modeldownloads -A -o wide` or `kubectl describe` for per-model status arrays.
+- Job inspection: `kubectl get jobs -l app=hf-downloader,parent=<cr-name> -n <ns>`.
+- Metrics endpoint: disabled by default (`--metrics-bind-address=0`). Supply `--metrics-bind-address=:8443` and certificates (or `--metrics-secure=false` for HTTP) to expose controller-runtime metrics.
+- Health probes: `/healthz` and `/readyz` run on `:8081` by default and are wired into the manager deployment.
+- Common failure modes:
+  - Secret/key missing → operator requeues every 10s until present.
+  - PVC absent → job creation fails; check controller logs and ensure the PVC exists in the same namespace.
+  - Download throttled → inspect job logs; consider enabling HF Transfer or increasing resources.
+
+## Development
+
+Common make targets (run `make help` for the full list):
+
+- `make test`: runs unit tests with envtest (requires Kind binaries downloaded automatically).
+- `make lint` / `make lint-fix`: executes `golangci-lint`.
+- `make run`: runs the controller locally against the current kubeconfig.
+- `make build`: produces `bin/manager`.
+- `make test-e2e`: spins up a Kind cluster (`hf-operator-test-e2e`), runs Ginkgo tests in `test/e2e`, and tears the cluster down.
+- `make docker-buildx`: builds and pushes multi-arch images if you have BuildKit + `docker buildx` configured.
+
+Helpful tips:
+
+- This repository vendors tooling into `./bin` on demand; ensure that directory is writable.
+- The controller currently uses the stock Ubuntu base image and installs Python packages at runtime. For production, bake a custom downloader image and update the job template logic accordingly.
+- Keep `api/v1alpha1` types and generated CRDs in sync by running `make generate && make manifests` whenever spec changes.
 
 ## Project Distribution
 
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/hf-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/hf-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+- **Single YAML bundle**: `make build-installer IMG=<registry>/hf-operator:<tag>` emits `dist/install.yaml`, suitable for `kubectl apply -f` workflows or GitOps tooling.
+- **Helm package**: package the chart (e.g., `helm package charts/hf-operator`) and publish to an OCI registry or static chart repo.
+- **CI**: GitHub workflows under `.github/workflows/` cover linting, conformance tests, and publishing releases; adjust them to point at your registry before tagging.
 
 ## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+Issues and pull requests are welcome. Please:
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+1. Create an issue describing the change or bug.
+2. Fork, branch, and run `make test lint`.
+3. Include relevant docs/tests.
+4. Submit a PR referencing the issue.
+
+For significant features (new CRDs, webhook logic, etc.) open a design discussion first so the API surface remains coherent.
 
 ## License
 
@@ -132,4 +225,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

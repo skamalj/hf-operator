@@ -1,0 +1,10 @@
+apiVersion: v2
+name: hf-operator
+description: Helm chart for HF Model Download operator
+type: application
+version: 0.1.0
+appVersion: "v0.1.0"
+keywords:
+  - operator
+  - hf
+  - huggingface

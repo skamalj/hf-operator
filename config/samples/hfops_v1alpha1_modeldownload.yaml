@@ -1,0 +1,9 @@
+apiVersion: hfops.kamal.dev/v1alpha1
+kind: ModelDownload
+metadata:
+  labels:
+    app.kubernetes.io/name: hf-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: modeldownload-sample
+spec:
+  # TODO(user): Add fields here

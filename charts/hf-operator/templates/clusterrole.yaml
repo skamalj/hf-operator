@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hf-operator.name" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "secrets", "events"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["hfops.kamal.dev"]
+    resources: ["modeldownloads", "modeldownloads/status"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]

@@ -1,0 +1,114 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: modeldownloads.hfops.kamal.dev
+spec:
+  group: hfops.kamal.dev
+  names:
+    kind: ModelDownload
+    listKind: ModelDownloadList
+    plural: modeldownloads
+    singular: modeldownload
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ModelDownload is the Schema for the modeldownloads API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ModelDownload
+            properties:
+              hfTokenRef:
+                properties:
+                  key:
+                    type: string
+                  name:
+                    type: string
+                required:
+                - key
+                - name
+                type: object
+              models:
+                items:
+                  properties:
+                    name:
+                      type: string
+                    retryCount:
+                      format: int32
+                      type: integer
+                    sha:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              nodePool:
+                type: string
+              settings:
+                properties:
+                  cpu:
+                    type: string
+                  enableHFTransfer:
+                    type: boolean
+                  forceReload:
+                    type: boolean
+                  keepAliveSeconds:
+                    format: int32
+                    type: integer
+                  memory:
+                    type: string
+                  timeoutMillis:
+                    format: int32
+                    type: integer
+                type: object
+              storagePVC:
+                type: string
+            required:
+            - hfTokenRef
+            - models
+            - storagePVC
+            type: object
+          status:
+            description: status defines the observed state of ModelDownload
+            properties:
+              completed:
+                items:
+                  type: string
+                type: array
+              failed:
+                items:
+                  type: string
+                type: array
+              pending:
+                items:
+                  type: string
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

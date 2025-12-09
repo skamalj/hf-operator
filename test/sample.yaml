@@ -1,0 +1,18 @@
+apiVersion: hfops.kamal.dev/v1alpha1
+kind: ModelDownload
+metadata:
+  name: hf-example
+spec:
+  storagePVC: azure-blob-model-pvc
+  hfTokenRef:
+    name: hf-token-secret
+    key: HF_TOKEN
+  nodePool: cpu-pool
+  settings:
+    cpu: "1"
+    memory: "3Gi"
+    enableHFTransfer: true
+    keepAliveSeconds: 600
+    forceReload: false
+  models:
+    - name: deepseek-ai/DeepSeek-Math-V2
